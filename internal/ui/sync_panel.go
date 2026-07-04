@@ -1,28 +1,40 @@
 package ui
 
 import (
+	"fmt"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/adam/y2psync/internal/database"
+	"github.com/adam/y2psync/internal/sync"
 )
 
 type SyncPanel struct {
-	configRepo  *database.ConfigRepo
+	syncer *sync.Syncer
+
 	statusLabel *widget.Label
-	peerLabel   *widget.Label
+	knownLabel  *widget.Label
+	syncedLabel *widget.Label
 	lastSync    *widget.Label
 }
 
-func NewSyncPanel(configRepo *database.ConfigRepo) *SyncPanel {
-	sp := &SyncPanel{configRepo: configRepo}
+func NewSyncPanel(syncer *sync.Syncer) *SyncPanel {
+	sp := &SyncPanel{
+		syncer: syncer,
+	}
 
-	sp.statusLabel = widget.NewLabel("Status: Idle")
-	sp.peerLabel = widget.NewLabel("Known peers: 0")
-	sp.lastSync = widget.NewLabel("Last sync: Never")
+	ss := syncer.SyncStatus()
+	sp.statusLabel = widget.NewLabel(fmt.Sprintf("Status: %s", ss.State))
+	sp.knownLabel = widget.NewLabel(fmt.Sprintf("Devices known: %d", ss.KnownPeers))
+	sp.syncedLabel = widget.NewLabel(fmt.Sprintf("Devices synced: %d", ss.SyncedPeers))
+	lastSync := ss.LastSync
+	if lastSync == "" {
+		lastSync = "Never"
+	}
+	sp.lastSync = widget.NewLabel("Last sync: " + lastSync)
 
-	sp.refresh()
+	go sp.watchStatus()
 
 	return sp
 }
@@ -30,23 +42,27 @@ func NewSyncPanel(configRepo *database.ConfigRepo) *SyncPanel {
 func (sp *SyncPanel) Container() fyne.CanvasObject {
 	statusGroup := widget.NewCard("Sync Status", "", container.NewVBox(
 		sp.statusLabel,
-		sp.peerLabel,
+		sp.knownLabel,
+		sp.syncedLabel,
 		sp.lastSync,
 	))
 
-	infoLabel := widget.NewLabel("P2P sync is a planned feature.\nPeer discovery and sync sessions\nwill be implemented in a future update.\n\nLocal operations work fully offline.")
-	infoGroup := widget.NewCard("Coming Soon", "", infoLabel)
+	infoGroup := widget.NewCard("P2P Sync", "",
+		widget.NewLabel("Sync runs automatically when a Master Sync Key\nis configured in Settings.\n\nDiscovers other y2psync devices via the\npublic IPFS DHT. Connections are encrypted\nvia libp2p Noise.\n\nStatus becomes 'Settled' once all known\ndevices have been found."))
 
 	return container.NewVBox(statusGroup, infoGroup)
 }
 
-func (sp *SyncPanel) refresh() {
-	peerID, _ := sp.configRepo.Get("peer_id")
-	if peerID != "" {
-		sp.peerLabel.SetText("Peer ID: " + peerID[:16] + "...")
-	}
-	lastSync, _ := sp.configRepo.Get("last_sync_timestamp")
-	if lastSync != "" {
+func (sp *SyncPanel) watchStatus() {
+	ch := sp.syncer.SyncStatusChan()
+	for ss := range ch {
+		sp.statusLabel.SetText(fmt.Sprintf("Status: %s", ss.State))
+		sp.knownLabel.SetText(fmt.Sprintf("Devices known: %d", ss.KnownPeers))
+		sp.syncedLabel.SetText(fmt.Sprintf("Devices synced: %d", ss.SyncedPeers))
+		lastSync := ss.LastSync
+		if lastSync == "" {
+			lastSync = "Never"
+		}
 		sp.lastSync.SetText("Last sync: " + lastSync)
 	}
 }

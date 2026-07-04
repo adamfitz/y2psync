@@ -9,6 +9,7 @@ import (
 	"fyne.io/fyne/v2/app"
 
 	"github.com/adam/y2psync/internal/database"
+	"github.com/adam/y2psync/internal/sync"
 	"github.com/adam/y2psync/internal/ui"
 )
 
@@ -32,12 +33,19 @@ func main() {
 	subRepo := database.NewSubscriptionRepo(db)
 	configRepo := database.NewConfigRepo(db)
 
+	syncer := sync.NewSyncer(db, configRepo)
+
 	a := app.NewWithID("com.y2psync.app")
 	win := a.NewWindow("y2psync")
 
-	ui.NewApp(win, db, playlistRepo, subRepo, configRepo)
+	ui.NewApp(win, db, playlistRepo, subRepo, configRepo, syncer)
+
+	if syncer.IsSyncConfigured() {
+		go syncer.Run()
+	}
 
 	win.ShowAndRun()
+	syncer.Stop()
 }
 
 func defaultDataDir() string {
