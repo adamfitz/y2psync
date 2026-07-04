@@ -106,6 +106,10 @@ func (sv *SubscriptionView) ensureDefaultList() {
 	sv.listID = list.ID
 }
 
+func (sv *SubscriptionView) refreshEntries() {
+	sv.loadEntries()
+}
+
 func (sv *SubscriptionView) loadEntries() {
 	if sv.listID == "" {
 		return

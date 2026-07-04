@@ -24,10 +24,18 @@ type SettingsView struct {
 	syncKeyEntry *widget.Entry
 	saveKeyBtn   *widget.Button
 	clearKeyBtn  *widget.Button
+	onRefresh    func()
 }
 
-func NewSettingsView(db *database.DB, configRepo *database.ConfigRepo, win fyne.Window) *SettingsView {
+func NewSettingsView(db *database.DB, configRepo *database.ConfigRepo, win fyne.Window, refreshCallbacks ...func()) *SettingsView {
 	sv := &SettingsView{db: db, configRepo: configRepo, win: win}
+	if len(refreshCallbacks) > 0 {
+		sv.onRefresh = func() {
+			for _, cb := range refreshCallbacks {
+				cb()
+			}
+		}
+	}
 
 	sv.peerIDLabel = widget.NewLabel("Loading...")
 	sv.syncKeyEntry = widget.NewPasswordEntry()
@@ -54,9 +62,13 @@ func (sv *SettingsView) Container() fyne.CanvasObject {
 	dbPath := sv.db.Path()
 	sv.dbPathLabel = widget.NewLabel(dbPath)
 
+	restoreBtn := widget.NewButton("Restore Database...", func() {
+		sv.showRestoreDialog()
+	})
+
 	databaseGroup := widget.NewCard("Database", "", container.NewVBox(
 		container.NewBorder(nil, nil, widget.NewLabel("Location:"), nil, sv.dbPathLabel),
-		container.NewHBox(backupBtn),
+		container.NewHBox(backupBtn, restoreBtn),
 	))
 
 	identityGroup := widget.NewCard("Device Identity", "", container.NewVBox(
@@ -165,4 +177,71 @@ func (sv *SettingsView) showBackupDialog() {
 	}, sv.win)
 	save.Resize(fyne.NewSize(640, 480))
 	save.Show()
+}
+
+func (sv *SettingsView) showRestoreDialog() {
+	open := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
+		if err != nil {
+			dialog.ShowError(fmt.Errorf("open dialog error: %w", err), sv.win)
+			return
+		}
+		if reader == nil {
+			return
+		}
+		backupPath := reader.URI().Path()
+		reader.Close()
+
+		sv.showRestoreModeDialog(backupPath)
+	}, sv.win)
+	open.Resize(fyne.NewSize(640, 480))
+	open.Show()
+}
+
+func (sv *SettingsView) showRestoreModeDialog(backupPath string) {
+	group := widget.NewRadioGroup([]string{"Fresh Restore", "Merge into Existing"}, func(string) {})
+	group.Selected = "Merge into Existing"
+
+	d := dialog.NewCustomConfirm("Restore Database",
+		"Restore", "Cancel",
+		container.NewVBox(
+			widget.NewLabel(fmt.Sprintf("Backup file: %s", backupPath)),
+			widget.NewLabel("Choose restore mode:"),
+			group,
+			widget.NewLabel("Fresh Restore: replaces all data and settings"),
+			widget.NewLabel("Merge: adds missing playlists and entries without overwriting"),
+		),
+		func(ok bool) {
+			if !ok {
+				return
+			}
+			sv.executeRestore(backupPath, group.Selected == "Fresh Restore")
+		}, sv.win)
+	d.Resize(fyne.NewSize(500, 350))
+	d.Show()
+}
+
+func (sv *SettingsView) executeRestore(backupPath string, fresh bool) {
+	backupDB, err := database.OpenFile(backupPath)
+	if err != nil {
+		dialog.ShowError(fmt.Errorf("open backup file: %w", err), sv.win)
+		return
+	}
+	defer backupDB.Close()
+
+	if err := sv.db.RestoreFrom(backupDB, fresh); err != nil {
+		dialog.ShowError(fmt.Errorf("restore failed: %w", err), sv.win)
+		return
+	}
+
+	sv.refreshDisplay()
+	dialog.ShowInformation("Restore Complete",
+		"Database has been restored from the backup.", sv.win)
+
+	if sv.onRefresh != nil {
+		sv.onRefresh()
+	}
+}
+
+func (sv *SettingsView) refreshDisplay() {
+	sv.ensurePeerID()
 }

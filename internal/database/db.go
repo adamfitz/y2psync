@@ -19,6 +19,17 @@ func (d *DB) Path() string {
 	return d.path
 }
 
+func OpenFile(dbPath string) (*DB, error) {
+	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_foreign_keys=on&mode=ro")
+	if err != nil {
+		return nil, fmt.Errorf("open database file: %w", err)
+	}
+	if err := db.Ping(); err != nil {
+		return nil, fmt.Errorf("ping database: %w", err)
+	}
+	return &DB{DB: db, path: dbPath}, nil
+}
+
 func Open(dataDir string) (*DB, error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)

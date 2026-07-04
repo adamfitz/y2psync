@@ -38,7 +38,10 @@ func NewApp(
 	a.playlistView = NewPlaylistView(playlistRepo, win)
 	a.subView = NewSubscriptionView(subRepo, win)
 	a.syncPanel = NewSyncPanel(configRepo)
-	a.settingsView = NewSettingsView(db, configRepo, win)
+	a.settingsView = NewSettingsView(db, configRepo, win,
+		a.playlistView.refreshList,
+		a.subView.refreshEntries,
+	)
 
 	playlistTab := container.NewTabItemWithIcon("Playlists", theme.ListIcon(), a.playlistView.Container())
 	subTab := container.NewTabItemWithIcon("Subscriptions", theme.MailComposeIcon(), a.subView.Container())
