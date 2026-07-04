@@ -5,6 +5,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/theme"
 	"github.com/adam/y2psync/internal/database"
+	"github.com/adam/y2psync/internal/sync"
 )
 
 type App struct {
@@ -18,6 +19,7 @@ type App struct {
 	subRepo      *database.SubscriptionRepo
 	configRepo   *database.ConfigRepo
 	db           *database.DB
+	syncer       *sync.Syncer
 }
 
 func NewApp(
@@ -26,6 +28,7 @@ func NewApp(
 	playlistRepo *database.PlaylistRepo,
 	subRepo *database.SubscriptionRepo,
 	configRepo *database.ConfigRepo,
+	syncer *sync.Syncer,
 ) *App {
 	a := &App{
 		win:          win,
@@ -33,11 +36,12 @@ func NewApp(
 		playlistRepo: playlistRepo,
 		subRepo:      subRepo,
 		configRepo:   configRepo,
+		syncer:       syncer,
 	}
 
 	a.playlistView = NewPlaylistView(playlistRepo, win)
 	a.subView = NewSubscriptionView(subRepo, win)
-	a.syncPanel = NewSyncPanel(configRepo)
+	a.syncPanel = NewSyncPanel(configRepo, syncer)
 	a.settingsView = NewSettingsView(db, configRepo, win,
 		a.playlistView.refreshList,
 		a.subView.refreshEntries,
@@ -45,7 +49,7 @@ func NewApp(
 
 	playlistTab := container.NewTabItemWithIcon("Playlists", theme.ListIcon(), a.playlistView.Container())
 	subTab := container.NewTabItemWithIcon("Subscriptions", theme.MailComposeIcon(), a.subView.Container())
-	syncTab := container.NewTabItemWithIcon("Sync", theme.ComputerIcon(), a.syncView())
+	syncTab := container.NewTabItemWithIcon("Sync", theme.ComputerIcon(), a.syncPanel.Container())
 	settingsTab := container.NewTabItemWithIcon("Settings", theme.SettingsIcon(), a.settingsView.Container())
 
 	tabs := container.NewAppTabs(playlistTab, subTab, syncTab, settingsTab)
@@ -55,8 +59,4 @@ func NewApp(
 	win.Resize(fyne.NewSize(900, 600))
 
 	return a
-}
-
-func (a *App) syncView() fyne.CanvasObject {
-	return a.syncPanel.Container()
 }

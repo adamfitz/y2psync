@@ -1,8 +1,8 @@
 # Software Architecture Document — y2psync
 
-**Version:** 1.0  
+**Version:** 1.1  
 **Date:** 2026-07-04  
-**Status:** Draft
+**Status:** Implemented (Desktop only)
 
 ---
 
@@ -17,6 +17,12 @@
 7. [Deployment View](#7-deployment-view)
 8. [Crosscutting Concepts](#8-crosscutting-concepts)
 9. [Architectural Decisions](#9-architectural-decisions)
+    - [ADR-001: Two Separate Identities](#901-adr-001-two-separate-identities-peer-id-vs-sync-group-key)
+    - [ADR-002: Timestamp-Based Conflict Resolution](#902-adr-002-timestamp-based-conflict-resolution-not-crdt)
+    - [ADR-003: No YouTube API Dependency](#903-adr-003-no-youtube-api-dependency)
+    - [ADR-004: P2P without central server](#904-adr-004-p2p-without-central-server)
+    - [ADR-005: JSON for Sync Serialization](#905-adr-005-json-for-sync-serialization)
+    - [ADR-006: Zig Build System with Hybrid CC Strategy](#906-adr-006-zig-build-system-with-hybrid-cc-strategy)
 10. [Quality Requirements](#10-quality-requirements)
 11. [Risks and Technical Debt](#11-risks-and-technical-debt)
 12. [Glossary](#12-glossary)
@@ -132,7 +138,7 @@ y2psync operates as a **personal data management tool** — it does not facilita
 External interfaces:
 - **YouTube Web Scrape** — Outbound HTTPS GET to `youtube.com` for publicly visible page HTML. No authentication, no cookies required. Rate-limited to reasonable human-like frequency.
 - **Public DHT** — Outbound connections to a public Distributed Hash Table (e.g., libp2p DHT or Mainline DHT) for peer discovery.
-- **P2P Sync Connections** — Direct encrypted connections between y2psync peers, initiated after DHT discovery or mDNS LAN discovery.
+- **P2P Sync Connections** — Direct encrypted connections between y2psync peers, initiated after DHT discovery.
 - **Android Share Intent** — Inbound `ACTION_SEND` with `text/plain` containing a YouTube URL, from any Android application (typically the official YouTube app).
 
 ---
@@ -143,18 +149,18 @@ External interfaces:
 
 | Domain | Decision | Rationale |
 |--------|----------|-----------|
-| Mobile platform | Kotlin + Jetpack Compose | Android-first; modern UI toolkit; native share intent support |
-| Desktop platform | Go with Fyne (or Rust with Tauri) | Cross-platform; good P2P library ecosystem; single binary deployment |
-| Local database | SQLite (Room on Android, go-sqlite3 or similar on desktop) | Ubiquitous, embedded, zero-configuration, offline-first |
-| P2P networking | libp2p (or custom subset using Mainline DHT) | Mature DHT implementation; NAT traversal; encrypted streams |
-| Encryption | ChaCha20-Poly1305 + Argon2id + Noise Protocol | Modern, audited, no hardware dependency, constant-time |
-| Serialization | Protocol Buffers (protobuf) | Compact, cross-platform, schema-enforced, backward-compatible |
+| Desktop platform | Go + Fyne v2.7 | Cross-platform; good P2P library ecosystem; single binary deployment |
+| Local database | SQLite (mattn/go-sqlite3, WAL mode) | Ubiquitous, embedded, zero-configuration, offline-first |
+| P2P networking | libp2p v0.48 (go-libp2p + go-libp2p-kad-dht) | Mature DHT implementation; NAT traversal; Noise-encrypted streams built-in |
+| Encryption | Argon2id key derivation + libp2p Noise transport | Modern, audited, no hardware dependency |
+| Serialization | JSON over libp2p streams | Self-describing, no code generation step, sufficient for sync payloads |
+| Build system | Zig (build.zig) | Cross-compilation with bundled libc; `zig cc` as drop-in C compiler for Go CGo |
 
 ### 4.2 Architecture Pattern
 
-**Local-first with opportunistic sync.** The application follows an offline-first architecture where the local database is the single source of truth. Sync is a background process that reconciles multiple local databases into a consistent state using timestamp-based conflict resolution.
+**Local-first with opportunistic sync.** The application follows an offline-first architecture where the local database is the single source of truth. Sync is a user-triggered or automatic process that reconciles multiple local databases into a consistent state using timestamp-based conflict resolution.
 
-The P2P layer uses a **gossip-style propagation** model: when a device syncs with any peer, it exchanges all changes since the last sync. Changes propagate through the network as devices connect with each other. There is no master node or central coordinator.
+The P2P layer uses a **full-set exchange** model: when a device syncs with a peer, it sends its full playlist and subscription data and receives the peer's full data. Each side merges what it receives using a dedup-by-identity merge (no overwrites). There is no master node or central coordinator. Incremental change logs are planned for future optimisation.
 
 ### 4.3 Identity Architecture
 
@@ -185,10 +191,10 @@ C4Container
   }
 
   System_Boundary(y2psync_desktop, "y2psync Desktop") {
-    Container(desktop_ui, "Desktop UI", "Go + Fyne / Rust + Tauri", "Provides user interface for managing playlists & subscriptions")
-    Container(desktop_db, "Local Database", "SQLite", "Stores playlists, subscriptions, entries, sync metadata")
-    Container(desktop_sync, "Sync Engine", "Go/Rust", "Manages peer discovery, sync sessions, conflict resolution")
-    Container(desktop_p2p, "P2P Agent", "Go/Rust (libp2p)", "Manages DHT discovery and encrypted P2P connections")
+    Container(desktop_ui, "Desktop UI", "Go + Fyne", "Provides user interface for managing playlists & subscriptions")
+    Container(desktop_db, "Local Database", "SQLite (mattn/go-sqlite3, WAL mode)", "Stores playlists, subscriptions, entries, config (key-value)")
+    Container(desktop_sync, "Sync Engine", "Go (internal/sync)", "Manages peer discovery, sync sessions, conflict resolution")
+    Container(desktop_p2p, "P2P Agent", "Go (libp2p)", "Manages DHT discovery and encrypted P2P connections via IPFS public DHT")
   }
 
   System_Ext(youtube, "YouTube (Web)", "Public YouTube HTML pages")
@@ -228,32 +234,27 @@ C4Container
 C4Component
   title Component diagram for y2psync Sync Engine
 
-  Container_Boundary(sync_engine, "Sync Engine") {
-    Component(discovery, "Peer Discovery", "DHT + mDNS", "Finds peer devices sharing the same Rendezvous Tag")
-    Component(handshake, "Handshake Manager", "Noise Protocol", "Authenticated key exchange using Sync Group Key")
-    Component(sync_session, "Sync Session", "Protocol Buffers", "Manages a sync session with a single peer")
-    Component(merge, "Merge Engine", "Timestamp-based CRDT", "Resolves conflicts; newest timestamp wins per entry")
-    Component(change_log, "Change Log", "Append-only journal", "Records all local mutations for incremental sync")
-    Component(serializer, "Data Serializer", "Protocol Buffers", "Serializes/deserializes sync payloads")
-    Component(sync_scheduler, "Sync Scheduler", "Background worker", "Triggers sync on network availability and periodically")
+  Container_Boundary(sync_engine, "Sync Engine (internal/sync)") {
+    Component(syncer, "Syncer (coordinator)", "Go", "Manages libp2p host lifecycle; derives Ed25519 key from Peer ID; start/stop")
+    Component(discovery, "Discovery", "DHT rendezvous", "Advertises rendezvous tag on public IPFS DHT; finds peers via routing.FindPeers")
+    Component(sync_session, "Sync Session", "JSON over libp2p stream", "Exchanges full playlist/subscription data with a peer; protocol ID /y2psync/1.0.0")
+    Component(merge, "Merge Engine", "Dedup-by-identity merge", "Merges incoming playlists by name, entries by video ID, subs by channel ID; no overwrites")
   }
 
-  Container_Boundary(db, "Local Database") {
-    Component(playlist_repo, "Playlist Repository", "SQL DAO", "CRUD for playlists and video entries")
-    Component(sub_repo, "Subscription Repository", "SQL DAO", "CRUD for subscription lists and channel entries")
-    Component(sync_repo, "Sync Metadata Repository", "SQL DAO", "Tracks last sync timestamps per peer, tombstones")
+  Container_Boundary(db, "Local Database (internal/database)") {
+    Component(playlist_repo, "PlaylistRepo", "SQL DAO", "CRUD for playlist_lists and playlist_entries tables")
+    Component(sub_repo, "SubscriptionRepo", "SQL DAO", "CRUD for subscription_lists and subscription_entries tables")
+    Component(config_repo, "ConfigRepo", "key-value store", "Get/Set/Delete for config table (peer_id, sync keys, settings)")
+    Component(migrator, "Migrator", "versioned SQL", "Applies sequential CREATE TABLE IF NOT EXISTS migrations")
   }
 
-  Rel(discovery, handshake, "Initiates", "Peer found")
-  Rel(handshake, sync_session, "Creates", "Authenticated")
-  Rel(sync_session, serializer, "Uses", "payload encoding")
-  Rel(sync_session, merge, "Calls", "conflict resolution")
-  Rel(merge, change_log, "Reads", "local changes")
+  Rel(discovery, sync_session, "Delivers peer.AddrInfo", "via channel")
+  Rel(syncer, discovery, "Controls start/stop", "")
+  Rel(syncer, sync_session, "Creates per-peer", "")
+  Rel(sync_session, merge, "Delegates incoming data", "")
   Rel(merge, playlist_repo, "Reads/Writes", "playlist data")
   Rel(merge, sub_repo, "Reads/Writes", "subscription data")
-  Rel(merge, sync_repo, "Reads/Writes", "sync metadata")
-  Rel(sync_scheduler, discovery, "Triggers", "on schedule/event")
-  Rel(sync_scheduler, sync_session, "Triggers", "on peers found")
+  Rel(syncer, config_repo, "Reads peer ID + rendezvous tag", "for key derivation")
 
   UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="2")
 ```
@@ -291,43 +292,42 @@ SubscriptionEntry
   - is_deleted: boolean (tombstone)
   - deleted_at: timestamp (nullable)
 
-SyncMetadata
-  - peer_id: string
-  - last_sync_timestamp: timestamp (UTC)
-  - last_sync_status: string
+Config (key-value)
+  - key: string (PK)
+  - value: string
+  - Typical keys: peer_id, master_sync_key_salt, sync_group_key, rendezvous_tag,
+    sync_key_configured, last_sync_timestamp
 ```
 
 ---
 
 ## 6. Runtime View
 
-### 6.1 Scenario: First-Time Sync Between Two Devices
+### 6.1 Scenario: Peer Discovery and Sync
 
 ```mermaid
 C4Dynamic
-  title Dynamic diagram — First-time sync between two devices
+  title Dynamic diagram — Peer discovery and sync between two devices
 
-  Container_Boundary(dev_a, "Device A (New, has data)") {
+  Container_Boundary(dev_a, "Device A (has data)") {
     Component(da_sync, "Sync Engine A", "")
     Component(da_p2p, "P2P Agent A", "")
     Component(da_db, "Local DB A", "")
   }
 
-  Container_Boundary(dev_b, "Device B (New, empty)") {
+  Container_Boundary(dev_b, "Device B (empty)") {
     Component(db_sync, "Sync Engine B", "")
     Component(db_p2p, "P2P Agent B", "")
     Component(db_db, "Local DB B", "")
   }
 
-  Rel(da_p2p, db_p2p, "1. Discover via DHT Rendezvous Tag", "")
-  Rel(da_p2p, db_p2p, "2. Establish Noise Protocol handshake", "")
-  Rel(da_p2p, db_p2p, "3. Authenticate with Sync Group Key", "")
-  Rel(da_sync, db_sync, "4. Open encrypted sync session", "")
-  Rel(da_sync, da_db, "5. Read full dataset", "")
-  Rel(da_sync, db_sync, "6. Send full dataset (serialized protobuf)", "")
-  Rel(db_sync, db_db, "7. Write all data to local DB", "")
-  Rel(db_sync, db_db, "8. Record sync timestamp", "")
-  Rel(db_sync, da_sync, "9. Confirm sync complete", "")
+  Rel(da_p2p, db_p2p, "1. Discover via DHT rendezvous tag", "public IPFS DHT")
+  Rel(da_p2p, db_p2p, "2. libp2p connect + Noise handshake", "encrypted stream established")
+  Rel(da_sync, db_sync, "3. Send JSON SyncMessage{playlists, subscriptions}", "over /y2psync/1.0.0 stream")
+  Rel(db_sync, db_db, "4. MergeEngine: write all data to local DB", "dedup by name/video ID/channel ID")
+  Rel(db_sync, da_sync, "5. Send JSON SyncMessage{playlists, subscriptions}", "bidirectional exchange")
+  Rel(da_sync, da_db, "6. MergeEngine: write peer's data to local DB", "same merge logic")
+  Rel(da_sync, da_db, "7. Record sync timestamp in config", "")
   UpdateLayoutConfig($c4ShapeInRow="2", $c4BoundaryInRow="2")
 ```
 
@@ -406,12 +406,14 @@ sequenceDiagram
 
 ### 7.2 Desktop Deployment
 
+**Build system:** Zig (`build.zig`). Run `zig build native` for the host platform, or set `-Dtarget=x86_64-linux`, `-Dtarget=aarch64-macos`, `-Dtarget=x86_64-windows` for cross-compilation. The output binary is in `build/<os>-<arch>/y2psync`.
+
 ```
 ┌──────────────────────────────────────┐
 │         Desktop Machine               │
 │  (Linux / Windows / macOS)           │
 │  ┌────────────────────────────────┐  │
-│  │  y2psync Desktop Binary         │  │
+│  │  y2psync (~47MB static binary) │  │
 │  │  ┌──────────┐ ┌─────────────┐  │  │
 │  │  │ App UI   │ │ Sync Engine │  │  │
 │  │  └──────────┘ └─────────────┘  │  │
@@ -421,6 +423,7 @@ sequenceDiagram
 │  └────────────────────────────────┘  │
 │  ┌────────────────────────────────┐  │
 │  │ OS                             │  │
+│  │ - X11/Wayland/OpenGL (dyn)     │  │
 │  │ - Network Stack                │  │
 │  │ - File System (DB file)        │  │
 │  └────────────────────────────────┘  │
@@ -441,19 +444,13 @@ C4Deployment
     Container(desktop_app, "y2psync Desktop", "Native binary")
   }
 
-  Deployment_Node(lan, "Local Network", "LAN / WiFi") {
-    Container_Ext(mdns, "mDNS Discovery", "Multicast DNS")
-  }
-
   Deployment_Node(wan, "Internet", "WAN") {
-    Container_Ext(dht, "Public DHT", "libp2p / Mainline DHT")
+    Container_Ext(dht, "Public IPFS DHT", "libp2p Kademlia DHT")
     Container_Ext(youtube_web, "YouTube", "Web servers")
   }
 
-  Rel(mobile_app, mdns, "LAN peer discovery", "mDNS")
-  Rel(desktop_app, mdns, "LAN peer discovery", "mDNS")
-  Rel(mobile_app, dht, "WAN peer discovery", "DHT rendezvous")
-  Rel(desktop_app, dht, "WAN peer discovery", "DHT rendezvous")
+  Rel(mobile_app, dht, "Peer discovery", "DHT rendezvous")
+  Rel(desktop_app, dht, "Peer discovery", "DHT rendezvous")
   Rel(mobile_app, desktop_app, "Direct P2P sync", "Encrypted (Noise + AEAD)")
   Rel(mobile_app, mobile_app, "Direct P2P sync", "Encrypted (Noise + AEAD)")
   Rel(desktop_app, desktop_app, "Direct P2P sync", "Encrypted (Noise + AEAD)")
@@ -467,27 +464,27 @@ C4Deployment
 
 ### 8.1 Domain Model
 
-The domain model is shared across all client platforms and is serialised via Protocol Buffers for network sync.
+The domain model is shared across all client platforms and serialised as JSON for network sync.
 
-**Core entities:**
+**Core entities (internal/model):**
 - `PlaylistList` — a named collection of video entries
-- `PlaylistEntry` — a single YouTube video reference with timestamp
+- `PlaylistEntry` — a single YouTube video reference (video ID + title + sort order)
 - `SubscriptionList` — a named collection of channel entries
-- `SubscriptionEntry` — a single YouTube channel reference with timestamp
-- `SyncMetadata` — per-peer tracking of last sync state
+- `SubscriptionEntry` — a single YouTube channel reference (channel ID + name + URL)
+- `SyncMetadata` — per-peer tracking of last sync state (stored in config table)
 
 **Identity values:**
 - `PeerID` — 256-bit random identifier, immutable for device lifetime
-- `SyncGroupKey` — derived from Master Sync Key, used for encryption
-- `RendezvousTag` — derived from Master Sync Key (separate path), used for discovery
+- `SyncGroupKey` — derived from Master Sync Key via Argon2id, used for encryption
+- `RendezvousTag` — SHA-256 of `"rendezvous:" + masterKey`, used for DHT discovery
 
 ### 8.2 Persistence
 
-- SQLite on all platforms
-- Room on Android (with Repository pattern)
-- go-sqlite3 or rusqlite on desktop
-- Schema migrations handled by versioned migrations
-- All timestamps stored as ISO 8601 UTC
+- SQLite via mattn/go-sqlite3 with WAL journal mode
+- Schema migrations via ordered SQL statements in `internal/database/migrations.go`
+- All timestamps stored as ISO 8601 UTC (RFC3339Nano)
+- Key-value config table for settings and sync metadata
+- Backup via WAL checkpoint + file copy; restore opens backup read-only and re-inserts
 
 ### 8.3 Security
 
@@ -499,13 +496,13 @@ The domain model is shared across all client platforms and is serialised via Pro
 
 ### 8.4 Synchronisation Protocol
 
-The sync protocol uses a **pull-push** model:
+The sync protocol uses a **full-set exchange** model over libp2p Noise-encrypted streams:
 
-1. **Handshake:** Noise Protocol `KK` pattern (both sides have pre-shared key = Sync Group Key)
-2. **Exchange:** Each peer sends its full change log since last sync timestamp
-3. **Merge:** Timestamp-based conflict resolution — for each entry, the newer `created_at` wins
-4. **Tombstones:** Deletions are recorded with timestamp to prevent resurrection
-5. **Serialization:** Protocol Buffers over Noise-encrypted stream
+1. **Discovery:** Both peers advertise the rendezvous tag on the public IPFS DHT. When a peer is found, a direct libp2p connection is established with Noise transport encryption (built into go-libp2p).
+2. **Exchange:** Each peer sends its full dataset as a JSON `SyncMessage` containing all playlists with entries and all subscriptions. Exchange is bidirectional — both sides send and receive.
+3. **Merge:** Dedup-by-identity merge — playlists matched by name, entries by video ID, subscriptions by channel ID. No overwrites. New entries are appended with new UUIDs and current timestamps.
+4. **Serialization:** JSON over a libp2p stream with protocol ID `/y2psync/1.0.0`.
+5. **Key derivation:** The libp2p host Ed25519 identity is derived from the existing Peer ID (stored in config) via `SHA-256("libp2p-ed25519" + seed)`, ensuring the libp2p identity is consistent with the application-level Peer ID.
 
 ### 8.5 Error Handling
 
@@ -524,10 +521,10 @@ The sync protocol uses a **pull-push** model:
 
 ### 8.7 Testing
 
-- Unit tests for merge engine, URL parsing, data model
-- Integration tests for sync protocol (two in-memory peers exchange data)
-- Android instrumentation tests for share intent handling
-- Desktop CLI flag for headless sync-to-stdout for automated testing
+- Unit tests for database operations (playlist/subscription CRUD, restore)
+- Unit tests for URL parsing (video ID, channel ID extraction)
+- Integration tests for restore/merge using real backup files
+- Go vet enforced in CI
 
 ---
 
@@ -583,17 +580,31 @@ The sync protocol uses a **pull-push** model:
 - − NAT traversal may fail on restrictive networks (some users may need LAN sync only)
 - − Both devices must be online simultaneously for sync to occur
 
-### 9.5 ADR-005: Protocol Buffers for Serialization
+### 9.5 ADR-005: JSON for Sync Serialization
 
-**Context:** Cross-platform data serialization needed for sync protocol.
+**Context:** Cross-platform data serialization needed for sync protocol. Previously specified protobuf.
 
-**Decision:** Use Protocol Buffers (protobuf v3) for all sync payloads. Schema definitions stored in a shared `.proto` file.
+**Decision:** Use JSON for all sync payloads sent over libp2p streams. Each message is a self-describing JSON object encoded/decoded via Go's `encoding/json`.
 
 **Consequences:**
-- + Compact binary format
-- + Schema enforcement and backward compatibility
-- + Code generation for Kotlin, Go, Rust, C++
-- − Requires schema management discipline
+- + No code generation step; no dependency on protoc
+- + Human-readable and debuggable on the wire
+- + Sufficient for the current sync payload sizes (typically < 1MB)
+- − Larger wire format than protobuf (acceptable for occasional sync)
+- − No schema enforcement at the serialization layer (mitigated by Go's type system)
+
+### 9.6 ADR-006: Zig Build System with Hybrid CC Strategy
+
+**Context:** The Go + Fyne stack requires a C compiler for CGo (graphics stack + SQLite). Cross-compilation for Linux/Windows/macOS is desired.
+
+**Decision:** Use Zig's `build.zig` as the build orchestrator. For native builds, the system C compiler is used directly. For cross-compilation, `zig cc` provides a cross-compiling C compiler with bundled target libcs.
+
+**Consequences:**
+- + `zig cc` enables cross-compilation without installing target-specific toolchains (MinGW, macOS SDK basics)
+- + `-extldflags=-static-libgcc` produces binaries with statically linked libgcc
+- + Single `zig build native` command for local builds
+- − Fyne's graphics stack (X11, Wayland, OpenGL) remains dynamically linked as they are OS-provided
+- − Cross-compilation requires X11 development headers for Linux targets; macOS cross-compilation requires Apple's frameworks
 
 ---
 
@@ -655,7 +666,10 @@ Quality Model for y2psync
 
 | Item | Description | Plan |
 |------|-------------|------|
-| iOS not yet supported | Architecture supports it, but implementation pending | Design protocol and data model to be iOS-compatible from day one |
+| Mobile (Android/iOS) not yet implemented | Architecture supports it, but only desktop client exists | Build mobile clients using the same sync protocol |
+| No incremental change log | Full dataset exchanged on every sync — inefficient for large data | Add change tracking and partial sync in future |
+| No mDNS LAN discovery | Only DHT-based WAN discovery implemented | Add mDNS for zero-config LAN sync |
+| Sync is user-triggered only | No periodic background sync or auto-discovery | Add sync scheduler that periodically checks for peers |
 | No automated recovery from database corruption | SQLite is robust but not immune | Add periodic integrity checks in future release |
 | No web UI | Currently only native apps | A web client could be added using the same sync protocol |
 | No export/import of data as JSON | Users may want portable backup | Add in v1.1 milestone |
@@ -686,6 +700,8 @@ Quality Model for y2psync
 | **Argon2id** | A modern, memory-hard key derivation function resistant to GPU and ASIC attacks. |
 | **ChaCha20-Poly1305** | An AEAD cipher providing encryption and authentication. |
 | **libp2p** | A modular networking stack for P2P applications, providing DHT, NAT traversal, and encrypted streams. |
+| **Zig** | A general-purpose programming language and toolchain. The `zig cc` subcommand provides a cross-compiling C compiler with bundled target libcs, used as the C compiler for Go CGo during cross-compilation builds of y2psync. |
+| **WAL** | Write-Ahead Log — a journaling mode for SQLite that improves concurrent read performance. Used by y2psync for the local database. |
 
 ---
 

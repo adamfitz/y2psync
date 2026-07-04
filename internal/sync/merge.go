@@ -1,13 +1,15 @@
 package sync
 
-import "fmt"
+import "github.com/adam/y2psync/internal/database"
 
-type MergeEngine struct{}
-
-func NewMergeEngine() *MergeEngine {
-	return &MergeEngine{}
+type MergeEngine struct {
+	db *database.DB
 }
 
-func (m *MergeEngine) ResolveConflicts() error {
-	return fmt.Errorf("merge engine not implemented: requires full sync protocol")
+func NewMergeEngine(db *database.DB) *MergeEngine {
+	return &MergeEngine{db: db}
+}
+
+func (m *MergeEngine) ResolveConflicts(msg *SyncMessage) error {
+	return MergeIncomingData(m.db, msg)
 }
