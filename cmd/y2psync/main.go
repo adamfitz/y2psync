@@ -40,7 +40,12 @@ func main() {
 
 	ui.NewApp(win, db, playlistRepo, subRepo, configRepo, syncer)
 
+	if syncer.IsSyncConfigured() {
+		go syncer.Run()
+	}
+
 	win.ShowAndRun()
+	syncer.Stop()
 }
 
 func defaultDataDir() string {

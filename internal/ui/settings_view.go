@@ -13,12 +13,14 @@ import (
 
 	"github.com/adam/y2psync/internal/crypto"
 	"github.com/adam/y2psync/internal/database"
+	"github.com/adam/y2psync/internal/sync"
 )
 
 type SettingsView struct {
 	win          fyne.Window
 	db           *database.DB
 	configRepo   *database.ConfigRepo
+	syncer       *sync.Syncer
 	peerIDLabel  *widget.Label
 	dbPathLabel  *widget.Label
 	syncKeyEntry *widget.Entry
@@ -27,8 +29,8 @@ type SettingsView struct {
 	onRefresh    func()
 }
 
-func NewSettingsView(db *database.DB, configRepo *database.ConfigRepo, win fyne.Window, refreshCallbacks ...func()) *SettingsView {
-	sv := &SettingsView{db: db, configRepo: configRepo, win: win}
+func NewSettingsView(db *database.DB, configRepo *database.ConfigRepo, win fyne.Window, syncer *sync.Syncer, refreshCallbacks ...func()) *SettingsView {
+	sv := &SettingsView{db: db, configRepo: configRepo, syncer: syncer, win: win}
 	if len(refreshCallbacks) > 0 {
 		sv.onRefresh = func() {
 			for _, cb := range refreshCallbacks {
@@ -138,7 +140,9 @@ func (sv *SettingsView) saveSyncKey() {
 		return
 	}
 
-	dialog.ShowInformation("Sync Key Saved", "Master Sync Key has been configured.\n\nSync Group Key and Rendezvous Tag derived.\nSync will activate when other devices are found.", sv.win)
+	dialog.ShowInformation("Sync Key Saved", "Master Sync Key has been configured.\n\nSync Group Key and Rendezvous Tag derived.\nSync is now active in the background.", sv.win)
+
+	go sv.syncer.Run()
 }
 
 func (sv *SettingsView) clearSyncKey() {
@@ -152,6 +156,7 @@ func (sv *SettingsView) clearSyncKey() {
 			sv.configRepo.Delete("sync_group_key")
 			sv.configRepo.Delete("rendezvous_tag")
 			sv.configRepo.Delete("sync_key_configured")
+			sv.syncer.Stop()
 			dialog.ShowInformation("Cleared", "Sync key cleared. Local data preserved.", sv.win)
 		}, sv.win)
 }

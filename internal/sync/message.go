@@ -34,6 +34,7 @@ type SyncMessage struct {
 	PeerID        string         `json:"peer_id,omitempty"`
 	Playlists     []SyncPlaylist `json:"playlists,omitempty"`
 	Subscriptions []SyncSub      `json:"subscriptions,omitempty"`
+	KnownPeers    []string       `json:"known_peers,omitempty"`
 }
 
 func encodeJSONMessage(w io.Writer, msg *SyncMessage) error {
@@ -48,7 +49,7 @@ func decodeJSONMessage(r io.Reader) (*SyncMessage, error) {
 	return &msg, nil
 }
 
-func collectLocalData(srcPlaylist *database.PlaylistRepo, srcSub *database.SubscriptionRepo) (*SyncMessage, error) {
+func collectLocalData(srcPlaylist *database.PlaylistRepo, srcSub *database.SubscriptionRepo, peerID string, knownPeers []string) (*SyncMessage, error) {
 	playlists, err := srcPlaylist.ListLists()
 	if err != nil {
 		return nil, fmt.Errorf("list playlists: %w", err)
@@ -95,8 +96,10 @@ func collectLocalData(srcPlaylist *database.PlaylistRepo, srcSub *database.Subsc
 
 	return &SyncMessage{
 		Type:          "data",
+		PeerID:        peerID,
 		Playlists:     syncPlaylists,
 		Subscriptions: syncSubs,
+		KnownPeers:    knownPeers,
 	}, nil
 }
 

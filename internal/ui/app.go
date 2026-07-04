@@ -41,8 +41,8 @@ func NewApp(
 
 	a.playlistView = NewPlaylistView(playlistRepo, win)
 	a.subView = NewSubscriptionView(subRepo, win)
-	a.syncPanel = NewSyncPanel(configRepo, syncer)
-	a.settingsView = NewSettingsView(db, configRepo, win,
+	a.syncPanel = NewSyncPanel(syncer)
+	a.settingsView = NewSettingsView(db, configRepo, win, syncer,
 		a.playlistView.refreshList,
 		a.subView.refreshEntries,
 	)

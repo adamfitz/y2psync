@@ -13,7 +13,7 @@ import (
 	"github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
-	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/multiformats/go-multiaddr"
 
 	"github.com/adam/y2psync/internal/database"
@@ -22,11 +22,25 @@ import (
 type Status string
 
 const (
-	StatusIdle     Status = "Idle"
-	StatusStarting Status = "Starting..."
-	StatusRunning  Status = "Running"
-	StatusStopped  Status = "Stopped"
+	StatusIdle        Status = "Idle"
+	StatusDiscovering Status = "Discovering..."
+	StatusSettled     Status = "Settled"
+	StatusError       Status = "Error"
 )
+
+const (
+	activeInterval  = 30 * time.Second
+	settledInterval = 5 * time.Minute
+	settleCycles    = 3
+	reSyncInterval  = 5 * time.Minute
+)
+
+type SyncStatus struct {
+	State       Status
+	KnownPeers  int
+	SyncedPeers int
+	LastSync    string
+}
 
 type Syncer struct {
 	db         *database.DB
@@ -34,17 +48,18 @@ type Syncer struct {
 	rendezvous string
 	peerIDStr  string
 
-	mu        sync.Mutex
-	status    Status
-	host      host.Host
-	dht       *dht.IpfsDHT
-	discovery *Discovery
-	session   *Session
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
+	mu          sync.Mutex
+	status      Status
+	host        host.Host
+	dht         *dht.IpfsDHT
+	discovery   *Discovery
+	knownPeers  map[string]bool
+	syncedPeers map[string]time.Time
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	running     bool
 
-	statusChan chan Status
-	peerCount  int
+	statusChan chan SyncStatus
 }
 
 func NewSyncer(db *database.DB, configRepo *database.ConfigRepo) *Syncer {
@@ -52,12 +67,14 @@ func NewSyncer(db *database.DB, configRepo *database.ConfigRepo) *Syncer {
 	rendezvous, _ := configRepo.Get("rendezvous_tag")
 
 	return &Syncer{
-		db:         db,
-		configRepo: configRepo,
-		peerIDStr:  peerID,
-		rendezvous: rendezvous,
-		status:     StatusIdle,
-		statusChan: make(chan Status, 8),
+		db:          db,
+		configRepo:  configRepo,
+		peerIDStr:   peerID,
+		rendezvous:  rendezvous,
+		status:      StatusIdle,
+		knownPeers:  make(map[string]bool),
+		syncedPeers: make(map[string]time.Time),
+		statusChan:  make(chan SyncStatus, 8),
 	}
 }
 
@@ -67,13 +84,19 @@ func (s *Syncer) Status() Status {
 	return s.status
 }
 
-func (s *Syncer) PeerCount() int {
+func (s *Syncer) SyncStatus() SyncStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.peerCount
+	lastSync, _ := s.configRepo.Get("last_sync_timestamp")
+	return SyncStatus{
+		State:       s.status,
+		KnownPeers:  len(s.knownPeers),
+		SyncedPeers: len(s.syncedPeers),
+		LastSync:    lastSync,
+	}
 }
 
-func (s *Syncer) StatusChan() <-chan Status {
+func (s *Syncer) SyncStatusChan() <-chan SyncStatus {
 	return s.statusChan
 }
 
@@ -81,8 +104,21 @@ func (s *Syncer) setStatus(st Status) {
 	s.mu.Lock()
 	s.status = st
 	s.mu.Unlock()
+	s.sendStatus()
+}
+
+func (s *Syncer) sendStatus() {
+	lastSync, _ := s.configRepo.Get("last_sync_timestamp")
+	s.mu.Lock()
+	ss := SyncStatus{
+		State:       s.status,
+		KnownPeers:  len(s.knownPeers),
+		SyncedPeers: len(s.syncedPeers),
+		LastSync:    lastSync,
+	}
+	s.mu.Unlock()
 	select {
-	case s.statusChan <- st:
+	case s.statusChan <- ss:
 	default:
 	}
 }
@@ -92,30 +128,29 @@ func (s *Syncer) IsSyncConfigured() bool {
 	return configured == "true"
 }
 
-func (s *Syncer) Start() error {
+func (s *Syncer) Run() {
 	s.mu.Lock()
-	if s.status == StatusRunning || s.status == StatusStarting {
+	if s.running {
 		s.mu.Unlock()
-		return fmt.Errorf("sync already running")
+		return
 	}
-	s.status = StatusStarting
-	s.mu.Unlock()
-
 	if !s.IsSyncConfigured() {
-		return fmt.Errorf("sync key not configured")
+		s.mu.Unlock()
+		return
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	s.cancel = cancel
+	s.running = true
+	s.mu.Unlock()
 
 	privKey, err := s.deriveKey()
 	if err != nil {
-		cancel()
-		return fmt.Errorf("derive key: %w", err)
+		s.setStatus(StatusError)
+		s.mu.Lock()
+		s.running = false
+		s.mu.Unlock()
+		return
 	}
 
 	listenAddr, _ := multiaddr.NewMultiaddr("/ip4/0.0.0.0/tcp/0")
-
 	h, err := libp2p.New(
 		libp2p.ListenAddrs(listenAddr),
 		libp2p.Identity(privKey),
@@ -123,112 +158,187 @@ func (s *Syncer) Start() error {
 		libp2p.EnableAutoRelay(),
 	)
 	if err != nil {
-		cancel()
-		return fmt.Errorf("create libp2p host: %w", err)
+		s.setStatus(StatusError)
+		s.mu.Lock()
+		s.running = false
+		s.mu.Unlock()
+		return
 	}
+
+	ctx, cancel := context.WithCancel(context.Background())
 
 	d, err := dht.New(ctx, h, dht.Mode(dht.ModeServer))
 	if err != nil {
 		h.Close()
 		cancel()
-		return fmt.Errorf("create dht: %w", err)
+		s.setStatus(StatusError)
+		s.mu.Lock()
+		s.running = false
+		s.mu.Unlock()
+		return
 	}
 
 	if err := d.Bootstrap(ctx); err != nil {
 		h.Close()
 		cancel()
-		return fmt.Errorf("bootstrap dht: %w", err)
+		s.setStatus(StatusError)
+		s.mu.Lock()
+		s.running = false
+		s.mu.Unlock()
+		return
 	}
-
-	sess := NewSession(h, s.db)
-	h.SetStreamHandler(ProtocolID, sess.handleStream)
 
 	disc := NewDiscovery(h, d, s.rendezvous)
-	if err := disc.Start(ctx); err != nil {
-		h.Close()
-		cancel()
-		return fmt.Errorf("start discovery: %w", err)
-	}
+
+	h.SetStreamHandler(ProtocolID, func(stream network.Stream) {
+		defer stream.Close()
+		remotePeers, err := NewSession(h, s.db).exchange(context.Background(), stream, s.getKnownPeers())
+		if err != nil {
+			return
+		}
+		remoteID := stream.Conn().RemotePeer().String()
+		s.mu.Lock()
+		s.knownPeers[remoteID] = true
+		s.syncedPeers[remoteID] = time.Now()
+		for _, p := range remotePeers {
+			if p != s.peerIDStr {
+				s.knownPeers[p] = true
+			}
+		}
+		s.configRepo.Set("last_sync_timestamp", time.Now().UTC().Format(time.RFC3339))
+		s.mu.Unlock()
+		s.sendStatus()
+	})
 
 	s.mu.Lock()
 	s.host = h
 	s.dht = d
 	s.discovery = disc
-	s.session = sess
+	s.cancel = cancel
 	s.mu.Unlock()
 
 	s.wg.Add(1)
-	go s.syncLoop(ctx, disc)
+	go s.discoveryLoop(ctx, disc)
 
-	s.setStatus(StatusRunning)
-
-	return nil
+	s.setStatus(StatusDiscovering)
 }
 
 func (s *Syncer) Stop() {
 	s.mu.Lock()
-	wasRunning := s.status == StatusRunning || s.status == StatusStarting
-	s.mu.Unlock()
-
-	if !wasRunning {
+	if !s.running {
+		s.mu.Unlock()
 		return
 	}
-
 	if s.cancel != nil {
 		s.cancel()
 	}
+	s.mu.Unlock()
+
 	s.wg.Wait()
 
 	s.mu.Lock()
-	if s.discovery != nil {
-		s.discovery.Stop()
-	}
 	if s.host != nil {
 		s.host.Close()
 	}
-	s.discovery = nil
 	s.host = nil
 	s.dht = nil
-	s.session = nil
-	s.peerCount = 0
+	s.discovery = nil
+	s.cancel = nil
+	s.knownPeers = make(map[string]bool)
+	s.syncedPeers = make(map[string]time.Time)
+	s.running = false
 	s.mu.Unlock()
 
-	s.setStatus(StatusStopped)
-	time.Sleep(100 * time.Millisecond)
 	s.setStatus(StatusIdle)
 }
 
-func (s *Syncer) syncLoop(ctx context.Context, disc *Discovery) {
+func (s *Syncer) discoveryLoop(ctx context.Context, disc *Discovery) {
 	defer s.wg.Done()
 
-	peerChan := disc.Peers()
-	recent := make(map[peer.ID]time.Time)
+	interval := activeInterval
+	noNewCount := 0
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case pi, ok := <-peerChan:
-			if !ok {
-				return
-			}
-			if time.Since(recent[pi.ID]) < time.Minute {
+		case <-time.After(interval):
+		}
+
+		disc.Advertise(ctx)
+
+		peers, err := disc.FindPeers(ctx)
+		if err != nil {
+			continue
+		}
+
+		hostID := s.host.ID().String()
+		foundNew := false
+
+		for _, pi := range peers {
+			pid := pi.ID.String()
+			if pid == hostID {
 				continue
 			}
-			recent[pi.ID] = time.Now()
+
+			s.mu.Lock()
+			alreadyKnown := s.knownPeers[pid]
+			if !alreadyKnown {
+				s.knownPeers[pid] = true
+				foundNew = true
+			}
+			lastSync := s.syncedPeers[pid]
+			needsResync := time.Since(lastSync) > reSyncInterval
+			s.mu.Unlock()
+
+			if !needsResync && alreadyKnown {
+				continue
+			}
 
 			func() {
 				sess := NewSession(s.host, s.db)
-				if err := sess.SyncWithPeer(ctx, pi); err != nil {
+				remotePeers, err := sess.SyncWithPeer(ctx, pi, s.getKnownPeers())
+				if err != nil {
 					return
 				}
 
+				now := time.Now()
 				s.mu.Lock()
-				s.peerCount = len(recent)
+				s.syncedPeers[pid] = now
+				for _, p := range remotePeers {
+					if p != s.peerIDStr {
+						s.knownPeers[p] = true
+					}
+				}
+				s.configRepo.Set("last_sync_timestamp", now.UTC().Format(time.RFC3339))
 				s.mu.Unlock()
+				s.sendStatus()
 			}()
 		}
+
+		if foundNew {
+			noNewCount = 0
+			interval = activeInterval
+			s.setStatus(StatusDiscovering)
+		} else {
+			noNewCount++
+			if noNewCount >= settleCycles {
+				interval = settledInterval
+				s.setStatus(StatusSettled)
+			}
+		}
+		s.sendStatus()
 	}
+}
+
+func (s *Syncer) getKnownPeers() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	peers := make([]string, 0, len(s.knownPeers))
+	for k := range s.knownPeers {
+		peers = append(peers, k)
+	}
+	return peers
 }
 
 func (s *Syncer) deriveKey() (crypto.PrivKey, error) {

@@ -1,6 +1,6 @@
 # Software Architecture Document — y2psync
 
-**Version:** 1.1  
+**Version:** 1.2  
 **Date:** 2026-07-04  
 **Status:** Implemented (Desktop only)
 
@@ -158,9 +158,11 @@ External interfaces:
 
 ### 4.2 Architecture Pattern
 
-**Local-first with opportunistic sync.** The application follows an offline-first architecture where the local database is the single source of truth. Sync is a user-triggered or automatic process that reconciles multiple local databases into a consistent state using timestamp-based conflict resolution.
+**Local-first with opportunistic sync.** The application follows an offline-first architecture where the local database is the single source of truth. Sync runs **automatically** in the background when a Master Sync Key is configured — no user action is required beyond initial setup.
 
 The P2P layer uses a **full-set exchange** model: when a device syncs with a peer, it sends its full playlist and subscription data and receives the peer's full data. Each side merges what it receives using a dedup-by-identity merge (no overwrites). There is no master node or central coordinator. Incremental change logs are planned for future optimisation.
+
+**Continuous discovery with settle logic:** The sync engine runs a periodic discovery loop (every 30 seconds by default) that advertises on and queries the public IPFS DHT using the rendezvous tag. When a peer is found, both sides exchange their full datasets plus their list of known peer IDs. Each side merges the remote peer list into its own, causing all devices in the chain to converge on a shared view of the group membership. After 3 consecutive discovery cycles with no new peers found, the engine enters a **Settled** state and reduces the check interval to 5 minutes. If a new peer appears, it immediately returns to active discovery.
 
 ### 4.3 Identity Architecture
 
@@ -235,9 +237,9 @@ C4Component
   title Component diagram for y2psync Sync Engine
 
   Container_Boundary(sync_engine, "Sync Engine (internal/sync)") {
-    Component(syncer, "Syncer (coordinator)", "Go", "Manages libp2p host lifecycle; derives Ed25519 key from Peer ID; start/stop")
-    Component(discovery, "Discovery", "DHT rendezvous", "Advertises rendezvous tag on public IPFS DHT; finds peers via routing.FindPeers")
-    Component(sync_session, "Sync Session", "JSON over libp2p stream", "Exchanges full playlist/subscription data with a peer; protocol ID /y2psync/1.0.0")
+    Component(syncer, "Syncer (coordinator)", "Go", "Manages libp2p host lifecycle; derives Ed25519 key from Peer ID; Run/Stop lifecycle; tracks known peers and synced peers; continuous discovery loop with settle logic")
+    Component(discovery, "Discovery", "DHT rendezvous", "Advertises rendezvous tag on public IPFS DHT; finds peers via routing.FindPeers (synchronous, called periodically by Syncer)")
+    Component(sync_session, "Sync Session", "JSON over libp2p stream", "Exchanges full playlist/subscription data + known peer list with a peer; protocol ID /y2psync/1.0.0")
     Component(merge, "Merge Engine", "Dedup-by-identity merge", "Merges incoming playlists by name, entries by video ID, subs by channel ID; no overwrites")
   }
 
@@ -248,13 +250,13 @@ C4Component
     Component(migrator, "Migrator", "versioned SQL", "Applies sequential CREATE TABLE IF NOT EXISTS migrations")
   }
 
-  Rel(discovery, sync_session, "Delivers peer.AddrInfo", "via channel")
-  Rel(syncer, discovery, "Controls start/stop", "")
-  Rel(syncer, sync_session, "Creates per-peer", "")
+  Rel(syncer, discovery, "Calls Advertise + FindPeers in loop", "periodic (30s active / 5min settled)")
+  Rel(syncer, sync_session, "Creates per-peer with known peer list", "")
   Rel(sync_session, merge, "Delegates incoming data", "")
   Rel(merge, playlist_repo, "Reads/Writes", "playlist data")
   Rel(merge, sub_repo, "Reads/Writes", "subscription data")
   Rel(syncer, config_repo, "Reads peer ID + rendezvous tag", "for key derivation")
+  Rel(syncer, config_repo, "Updates last_sync_timestamp", "after each successful sync")
 
   UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="2")
 ```
@@ -303,11 +305,13 @@ Config (key-value)
 
 ## 6. Runtime View
 
-### 6.1 Scenario: Peer Discovery and Sync
+### 6.1 Scenario: Continuous Discovery and Sync
+
+The sync engine runs continuously while the application is open (if a Master Sync Key is configured). The primary loop executes on a timer — every 30 seconds during active discovery, every 5 minutes when settled.
 
 ```mermaid
 C4Dynamic
-  title Dynamic diagram — Peer discovery and sync between two devices
+  title Dynamic diagram — Continuous discovery and sync between two devices
 
   Container_Boundary(dev_a, "Device A (has data)") {
     Component(da_sync, "Sync Engine A", "")
@@ -321,14 +325,22 @@ C4Dynamic
     Component(db_db, "Local DB B", "")
   }
 
-  Rel(da_p2p, db_p2p, "1. Discover via DHT rendezvous tag", "public IPFS DHT")
+  Container_Boundary(dht, "Public IPFS DHT", "") {
+    Component(dht_net, "DHT Network", "")
+  }
+
+  Rel(da_sync, da_sync, "1. Loop: Advertise + FindPeers on DHT", "every 30s (active) or 5min (settled)")
+  Rel(da_p2p, dht_net, "Advertise rendezvous tag", "")
+  Rel(dht_net, da_p2p, "Return discovered peer IDs + addrs", "")
   Rel(da_p2p, db_p2p, "2. libp2p connect + Noise handshake", "encrypted stream established")
-  Rel(da_sync, db_sync, "3. Send JSON SyncMessage{playlists, subscriptions}", "over /y2psync/1.0.0 stream")
+  Rel(da_sync, db_sync, "3. Send JSON SyncMessage{playlists, subscriptions, known_peers_A}", "over /y2psync/1.0.0 stream")
   Rel(db_sync, db_db, "4. MergeEngine: write all data to local DB", "dedup by name/video ID/channel ID")
-  Rel(db_sync, da_sync, "5. Send JSON SyncMessage{playlists, subscriptions}", "bidirectional exchange")
-  Rel(da_sync, da_db, "6. MergeEngine: write peer's data to local DB", "same merge logic")
-  Rel(da_sync, da_db, "7. Record sync timestamp in config", "")
-  UpdateLayoutConfig($c4ShapeInRow="2", $c4BoundaryInRow="2")
+  Rel(db_sync, db_sync, "5. Merge known_peers_A into local peer set", "convergent group membership")
+  Rel(db_sync, da_sync, "6. Send JSON SyncMessage{playlists, subscriptions, known_peers_B}", "bidirectional exchange")
+  Rel(da_sync, da_db, "7. MergeEngine: write peer's data to local DB", "same merge logic")
+  Rel(da_sync, da_sync, "8. Merge known_peers_B into local peer set", "")
+  Rel(da_sync, da_sync, "9. If no new peers found for 3 cycles → Settled", "slow to 5min check interval")
+  UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="2")
 ```
 
 ### 6.2 Scenario: User Saves Video to Playlist (Mobile, via Share)
@@ -496,13 +508,67 @@ The domain model is shared across all client platforms and serialised as JSON fo
 
 ### 8.4 Synchronisation Protocol
 
-The sync protocol uses a **full-set exchange** model over libp2p Noise-encrypted streams:
+The sync engine runs **automatically** while the application is open (if a Master Sync Key is configured). It uses a continuous discovery loop with the following phases:
 
-1. **Discovery:** Both peers advertise the rendezvous tag on the public IPFS DHT. When a peer is found, a direct libp2p connection is established with Noise transport encryption (built into go-libp2p).
-2. **Exchange:** Each peer sends its full dataset as a JSON `SyncMessage` containing all playlists with entries and all subscriptions. Exchange is bidirectional — both sides send and receive.
-3. **Merge:** Dedup-by-identity merge — playlists matched by name, entries by video ID, subscriptions by channel ID. No overwrites. New entries are appended with new UUIDs and current timestamps.
-4. **Serialization:** JSON over a libp2p stream with protocol ID `/y2psync/1.0.0`.
-5. **Key derivation:** The libp2p host Ed25519 identity is derived from the existing Peer ID (stored in config) via `SHA-256("libp2p-ed25519" + seed)`, ensuring the libp2p identity is consistent with the application-level Peer ID.
+#### 8.4.1 Continuous Discovery Loop
+
+1. **Active discovery** (default interval: 30 seconds): The engine advertises the rendezvous tag on the public IPFS DHT and calls `FindPeers`. Every discovered peer is checked against the local known-peers set. Unknown peers trigger a sync session.
+2. **Settle logic:** If 3 consecutive discovery cycles find no new peers, the engine transitions to **Settled** state and reduces the check interval to 5 minutes. If a new peer appears at any point, it immediately returns to active 30-second discovery.
+3. **Re-sync:** Known peers are re-synced every 5 minutes to pick up any changes made since the previous sync.
+
+#### 8.4.2 Sync Session (Bidirectional JSON Exchange)
+
+Each sync session uses a **full-set exchange** model over libp2p Noise-encrypted streams:
+
+1. **Discovery:** Both peers advertise the rendezvous tag on the public IPFS DHT via `util.Advertise`. The syncer's loop periodically calls `util.FindPeers` to discover active peers.
+2. **Connection:** A direct libp2p connection is established with Noise transport encryption (built into go-libp2p) and a stream is opened with protocol ID `/y2psync/1.0.0`.
+3. **Exchange:** Each peer sends a JSON `SyncMessage` containing:
+   - `PeerID`: The sender's application-layer Peer ID (256-bit hex)
+   - `Playlists`: All playlists with entries
+   - `Subscriptions`: All subscription entries
+   - `KnownPeers`: List of peer IDs the sender knows about (enables convergent group membership)
+   The exchange is bidirectional — both sides send and receive simultaneously.
+4. **Merge:** Dedup-by-identity merge — playlists matched by name, entries by video ID, subscriptions by channel ID. No overwrites. New entries are appended with new UUIDs and current timestamps.
+5. **Peer list merge:** Each side merges the remote's `KnownPeers` into its local peer set. Over time, all devices in the sync chain converge on the same view of group membership.
+6. **Serialization:** JSON over a libp2p stream.
+7. **Key derivation:** The libp2p host Ed25519 identity is derived from the existing Peer ID (stored in config) via `SHA-256("libp2p-ed25519" + seed)`, ensuring the libp2p identity is consistent with the application-level Peer ID.
+
+#### 8.4.3 SyncMessage Format
+
+```json
+{
+  "type": "data",
+  "peer_id": "a1b2c3d4...",
+  "playlists": [
+    {
+      "name": "Watch Later",
+      "entries": [
+        {"video_id": "dQw4w9WgXcQ", "title": "Rick Astley"}
+      ]
+    }
+  ],
+  "subscriptions": [
+    {"channel_id": "UC...", "channel_name": "Channel Name", "channel_url": "https://..."}
+  ],
+  "known_peers": ["peerID1", "peerID2", "peerID3"]
+}
+```
+
+#### 8.4.4 Status Model
+
+The sync engine exposes a `SyncStatus` struct via a channel for UI updates:
+
+| Field | Description |
+|-------|-------------|
+| `State` | Current status: `Idle`, `Discovering...`, `Settled`, `Error` |
+| `KnownPeers` | Number of unique peer IDs discovered (from DHT or peer list exchange) |
+| `SyncedPeers` | Number of peers successfully synchronised with |
+| `LastSync` | RFC3339 timestamp of the most recent successful sync |
+
+- **Idle:** Sync is not configured or not running.
+- **Discovering...:** Actively searching for peers on the DHT (30s discovery interval).
+- **Settled:** No new peers found recently; all known peers have been synced (5min check interval).
+- **Error:** Sync encountered a fatal error (e.g., libp2p host creation failed).
 
 ### 8.5 Error Handling
 
@@ -668,8 +734,8 @@ Quality Model for y2psync
 |------|-------------|------|
 | Mobile (Android/iOS) not yet implemented | Architecture supports it, but only desktop client exists | Build mobile clients using the same sync protocol |
 | No incremental change log | Full dataset exchanged on every sync — inefficient for large data | Add change tracking and partial sync in future |
-| No mDNS LAN discovery | Only DHT-based WAN discovery implemented | Add mDNS for zero-config LAN sync |
-| Sync is user-triggered only | No periodic background sync or auto-discovery | Add sync scheduler that periodically checks for peers |
+| No mDNS LAN discovery | Only DHT-based WAN discovery implemented; DHT may fail on restrictive NATs | Add mDNS for zero-config LAN sync |
+| No background sync when app is closed | Sync only runs while the app is open | Consider a system tray daemon or background service |
 | No automated recovery from database corruption | SQLite is robust but not immune | Add periodic integrity checks in future release |
 | No web UI | Currently only native apps | A web client could be added using the same sync protocol |
 | No export/import of data as JSON | Users may want portable backup | Add in v1.1 milestone |
