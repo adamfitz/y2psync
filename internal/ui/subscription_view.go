@@ -15,22 +15,18 @@ import (
 )
 
 type SubscriptionView struct {
-	repo       *database.SubscriptionRepo
-	win        fyne.Window
-	listSelect *widget.Select
-	entryList  *widget.List
-	entries    []*model.SubscriptionEntry
-	addBtn     *widget.Button
-	createBtn  *widget.Button
-	deleteBtn  *widget.Button
+	repo      *database.SubscriptionRepo
+	win       fyne.Window
+	entryList *widget.List
+	entries   []*model.SubscriptionEntry
+	addBtn    *widget.Button
+	deleteBtn *widget.Button
+	listID    string
+	selected  int
 }
 
 func NewSubscriptionView(repo *database.SubscriptionRepo, win fyne.Window) *SubscriptionView {
-	sv := &SubscriptionView{repo: repo, win: win}
-
-	sv.listSelect = widget.NewSelect(nil, func(selected string) {
-		sv.loadEntries(selected)
-	})
+	sv := &SubscriptionView{repo: repo, win: win, selected: -1}
 
 	sv.entryList = widget.NewList(
 		func() int { return len(sv.entries) },
@@ -55,73 +51,66 @@ func NewSubscriptionView(repo *database.SubscriptionRepo, win fyne.Window) *Subs
 		},
 	)
 
+	sv.entryList.OnSelected = func(id widget.ListItemID) {
+		sv.selected = int(id)
+	}
+
 	sv.addBtn = widget.NewButton("Add Channel URL", func() {
 		sv.showAddDialog()
 	})
 
-	sv.createBtn = widget.NewButton("New List", func() {
-		sv.showCreateDialog()
-	})
-
-	sv.deleteBtn = widget.NewButton("Delete List", func() {
+	sv.deleteBtn = widget.NewButton("Delete Channel", func() {
 		sv.deleteSelected()
 	})
 
-	sv.refreshList()
+	sv.ensureDefaultList()
+	sv.loadEntries()
 
 	return sv
 }
 
 func (sv *SubscriptionView) Container() fyne.CanvasObject {
 	topBar := container.NewHBox(
-		widget.NewLabel("List:"),
-		sv.listSelect,
-		sv.createBtn,
-		sv.deleteBtn,
+		widget.NewLabel("Subscriptions"),
 		sv.addBtn,
+		sv.deleteBtn,
 	)
 
 	split := container.NewBorder(topBar, nil, nil, nil, sv.entryList)
 	return split
 }
 
-func (sv *SubscriptionView) refreshList() {
+func (sv *SubscriptionView) ensureDefaultList() {
 	lists, err := sv.repo.ListLists()
 	if err != nil {
 		return
 	}
-	names := make([]string, 0, len(lists))
-	for _, l := range lists {
-		names = append(names, l.Name)
-	}
-	sv.listSelect.Options = names
-	if len(names) > 0 {
-		sv.listSelect.SetSelected(names[0])
-	} else {
-		sv.listSelect.ClearSelected()
-		sv.entries = nil
-		sv.entryList.Refresh()
-	}
-}
 
-func (sv *SubscriptionView) loadEntries(listName string) {
-	if listName == "" {
-		sv.entries = nil
-		sv.entryList.Refresh()
-		return
-	}
-	lists, _ := sv.repo.ListLists()
-	var listID string
+	defaultName := "My Subscriptions"
 	for _, l := range lists {
-		if l.Name == listName {
-			listID = l.ID
-			break
+		if l.Name == defaultName {
+			sv.listID = l.ID
+			return
 		}
 	}
-	if listID == "" {
+
+	list := &model.SubscriptionList{
+		ID:        uuid.New().String(),
+		Name:      defaultName,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := sv.repo.CreateList(list); err != nil {
 		return
 	}
-	entries, err := sv.repo.GetEntries(listID)
+	sv.listID = list.ID
+}
+
+func (sv *SubscriptionView) loadEntries() {
+	if sv.listID == "" {
+		return
+	}
+	entries, err := sv.repo.GetEntries(sv.listID)
 	if err != nil {
 		return
 	}
@@ -129,62 +118,11 @@ func (sv *SubscriptionView) loadEntries(listName string) {
 	sv.entryList.Refresh()
 }
 
-func (sv *SubscriptionView) showCreateDialog() {
-	entry := widget.NewEntry()
-	entry.SetPlaceHolder("List name")
-
-	dialog.ShowForm("New Subscription List", "Create", "Cancel",
-		[]*widget.FormItem{
-			widget.NewFormItem("Name", entry),
-		},
-		func(ok bool) {
-			if !ok || entry.Text == "" {
-				return
-			}
-			list := &model.SubscriptionList{
-				ID:        uuid.New().String(),
-				Name:      entry.Text,
-				CreatedAt: time.Now().UTC(),
-				UpdatedAt: time.Now().UTC(),
-			}
-			if err := sv.repo.CreateList(list); err != nil {
-				dialog.ShowError(err, sv.win)
-				return
-			}
-			sv.refreshList()
-		},
-		sv.win,
-	)
-}
-
-func (sv *SubscriptionView) deleteSelected() {
-	selected := sv.listSelect.Selected
-	if selected == "" {
-		return
-	}
-	lists, _ := sv.repo.ListLists()
-	var listID string
-	for _, l := range lists {
-		if l.Name == selected {
-			listID = l.ID
-			break
-		}
-	}
-	if listID == "" {
-		return
-	}
-	if err := sv.repo.DeleteList(listID); err != nil {
-		dialog.ShowError(err, sv.win)
-		return
-	}
-	sv.refreshList()
-}
-
 func (sv *SubscriptionView) showAddDialog() {
 	urlEntry := widget.NewEntry()
 	urlEntry.SetPlaceHolder("https://www.youtube.com/channel/UC... or @handle")
 
-	dialog.ShowForm("Add Channel", "Add", "Cancel",
+	dialog.ShowForm("Add Channel Subscription", "Add", "Cancel",
 		[]*widget.FormItem{
 			widget.NewFormItem("Channel URL", urlEntry),
 		},
@@ -199,52 +137,54 @@ func (sv *SubscriptionView) showAddDialog() {
 }
 
 func (sv *SubscriptionView) addChannel(rawURL string) {
-	selected := sv.listSelect.Selected
-	if selected == "" {
-		dialog.ShowError(fmt.Errorf("no subscription list selected"), sv.win)
-		return
-	}
-
-	lists, _ := sv.repo.ListLists()
-	var listID string
-	for _, l := range lists {
-		if l.Name == selected {
-			listID = l.ID
-			break
-		}
-	}
-	if listID == "" {
-		return
-	}
-
 	channelID, err := extractChannelID(rawURL)
 	if err != nil {
 		dialog.ShowError(err, sv.win)
 		return
 	}
 
-	exists, err := sv.repo.EntryExists(listID, channelID)
+	exists, err := sv.repo.EntryExists(sv.listID, channelID)
 	if err != nil {
 		dialog.ShowError(err, sv.win)
 		return
 	}
 	if exists {
-		dialog.ShowInformation("Duplicate", "Channel is already in this list", sv.win)
+		dialog.ShowInformation("Duplicate", "Channel is already subscribed", sv.win)
 		return
 	}
 
 	entry := &model.SubscriptionEntry{
-		ID:               uuid.New().String(),
-		SubscriptionListID: listID,
-		YouTubeChannelID: channelID,
-		ChannelURL:       rawURL,
-		CreatedAt:        time.Now().UTC(),
+		ID:                 uuid.New().String(),
+		SubscriptionListID: sv.listID,
+		YouTubeChannelID:   channelID,
+		ChannelURL:         rawURL,
+		CreatedAt:          time.Now().UTC(),
 	}
 	if err := sv.repo.AddEntry(entry); err != nil {
 		dialog.ShowError(err, sv.win)
 		return
 	}
 
-	dialog.ShowInformation("Added", "Channel added to list", sv.win)
-	sv.loadEntries(selected)
+	sv.loadEntries()
+}
+
+func (sv *SubscriptionView) deleteSelected() {
+	if sv.selected < 0 || sv.selected >= len(sv.entries) {
+		dialog.ShowInformation("No Selection", "Click a subscription in the list to select it, then press Delete", sv.win)
+		return
+	}
+	entry := sv.entries[sv.selected]
+	dialog.ShowConfirm("Remove Subscription",
+		fmt.Sprintf("Remove %s from subscriptions?", entry.YouTubeChannelID),
+		func(ok bool) {
+			if !ok {
+				return
+			}
+			if err := sv.repo.RemoveEntry(entry.ID); err != nil {
+				dialog.ShowError(err, sv.win)
+				return
+			}
+			sv.selected = -1
+			sv.loadEntries()
+		}, sv.win)
 }

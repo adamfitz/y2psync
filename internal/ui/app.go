@@ -8,11 +8,11 @@ import (
 )
 
 type App struct {
-	win           fyne.Window
-	playlistView  *PlaylistView
-	subView       *SubscriptionView
-	syncPanel     *SyncPanel
-	settingsView  *SettingsView
+	win          fyne.Window
+	playlistView *PlaylistView
+	subView      *SubscriptionView
+	syncPanel    *SyncPanel
+	settingsView *SettingsView
 
 	playlistRepo *database.PlaylistRepo
 	subRepo      *database.SubscriptionRepo

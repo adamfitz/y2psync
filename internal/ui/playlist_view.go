@@ -22,6 +22,7 @@ type PlaylistView struct {
 	entryList   *widget.List
 	entries     []*model.PlaylistEntry
 	importBtn   *widget.Button
+	addVideoBtn *widget.Button
 	createBtn   *widget.Button
 	deleteBtn   *widget.Button
 }
@@ -56,6 +57,10 @@ func NewPlaylistView(repo *database.PlaylistRepo, win fyne.Window) *PlaylistView
 		},
 	)
 
+	pv.addVideoBtn = widget.NewButton("Add Video", func() {
+		pv.showAddVideoDialog()
+	})
+
 	pv.importBtn = widget.NewButton("Import from YouTube URL", func() {
 		pv.showImportDialog()
 	})
@@ -79,6 +84,7 @@ func (pv *PlaylistView) Container() fyne.CanvasObject {
 		pv.listSelect,
 		pv.createBtn,
 		pv.deleteBtn,
+		pv.addVideoBtn,
 		pv.importBtn,
 	)
 
@@ -179,6 +185,82 @@ func (pv *PlaylistView) deleteSelected() {
 		return
 	}
 	pv.refreshList()
+}
+
+func (pv *PlaylistView) showAddVideoDialog() {
+	selected := pv.listSelect.Selected
+	if selected == "" {
+		dialog.ShowInformation("No Playlist", "Select a playlist first", pv.win)
+		return
+	}
+
+	urlEntry := widget.NewEntry()
+	urlEntry.SetPlaceHolder("https://www.youtube.com/watch?v=... or https://youtu.be/...")
+
+	dialog.ShowForm("Add Video to Playlist", "Add", "Cancel",
+		[]*widget.FormItem{
+			widget.NewFormItem("Video URL", urlEntry),
+		},
+		func(ok bool) {
+			if !ok || urlEntry.Text == "" {
+				return
+			}
+			pv.addVideoToPlaylist(urlEntry.Text)
+		},
+		pv.win,
+	)
+}
+
+func (pv *PlaylistView) addVideoToPlaylist(rawURL string) {
+	videoID, err := extractVideoID(rawURL)
+	if err != nil {
+		dialog.ShowError(fmt.Errorf("invalid video URL: %w", err), pv.win)
+		return
+	}
+
+	selected := pv.listSelect.Selected
+	lists, _ := pv.repo.ListLists()
+	var listID string
+	for _, l := range lists {
+		if l.Name == selected {
+			listID = l.ID
+			break
+		}
+	}
+	if listID == "" {
+		dialog.ShowError(fmt.Errorf("playlist not found"), pv.win)
+		return
+	}
+
+	exists, err := pv.repo.EntryExists(listID, videoID)
+	if err != nil {
+		dialog.ShowError(err, pv.win)
+		return
+	}
+	if exists {
+		dialog.ShowInformation("Duplicate", "This video is already in the playlist", pv.win)
+		return
+	}
+
+	maxOrder, err := pv.repo.GetMaxSortOrder(listID)
+	if err != nil {
+		maxOrder = 0
+	}
+
+	entry := &model.PlaylistEntry{
+		ID:             uuid.New().String(),
+		PlaylistListID: listID,
+		YouTubeVideoID: videoID,
+		DisplayTitle:   videoID,
+		CreatedAt:      time.Now().UTC(),
+		SortOrder:      maxOrder + 1,
+	}
+	if err := pv.repo.AddEntry(entry); err != nil {
+		dialog.ShowError(err, pv.win)
+		return
+	}
+
+	pv.loadEntries(selected)
 }
 
 func (pv *PlaylistView) showImportDialog() {

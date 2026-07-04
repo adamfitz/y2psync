@@ -16,14 +16,14 @@ import (
 )
 
 type SettingsView struct {
-	win           fyne.Window
-	db            *database.DB
-	configRepo    *database.ConfigRepo
-	peerIDLabel   *widget.Label
-	dbPathLabel   *widget.Label
-	syncKeyEntry  *widget.Entry
-	saveKeyBtn    *widget.Button
-	clearKeyBtn   *widget.Button
+	win          fyne.Window
+	db           *database.DB
+	configRepo   *database.ConfigRepo
+	peerIDLabel  *widget.Label
+	dbPathLabel  *widget.Label
+	syncKeyEntry *widget.Entry
+	saveKeyBtn   *widget.Button
+	clearKeyBtn  *widget.Button
 }
 
 func NewSettingsView(db *database.DB, configRepo *database.ConfigRepo, win fyne.Window) *SettingsView {
