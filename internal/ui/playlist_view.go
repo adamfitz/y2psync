@@ -25,6 +25,7 @@ type PlaylistView struct {
 	addVideoBtn *widget.Button
 	createBtn   *widget.Button
 	deleteBtn   *widget.Button
+	countLabel  *widget.Label
 }
 
 func NewPlaylistView(repo *database.PlaylistRepo, win fyne.Window) *PlaylistView {
@@ -73,6 +74,8 @@ func NewPlaylistView(repo *database.PlaylistRepo, win fyne.Window) *PlaylistView
 		pv.deleteSelected()
 	})
 
+	pv.countLabel = widget.NewLabel("")
+
 	pv.refreshList()
 
 	return pv
@@ -88,7 +91,7 @@ func (pv *PlaylistView) Container() fyne.CanvasObject {
 		pv.importBtn,
 	)
 
-	split := container.NewBorder(topBar, nil, nil, nil, pv.entryList)
+	split := container.NewBorder(topBar, pv.countLabel, nil, nil, pv.entryList)
 	return split
 }
 
@@ -108,6 +111,7 @@ func (pv *PlaylistView) refreshList() {
 		pv.listSelect.ClearSelected()
 		pv.entries = nil
 		pv.entryList.Refresh()
+		pv.countLabel.SetText("")
 	}
 }
 
@@ -115,6 +119,7 @@ func (pv *PlaylistView) loadEntries(playlistName string) {
 	if playlistName == "" {
 		pv.entries = nil
 		pv.entryList.Refresh()
+		pv.countLabel.SetText("")
 		return
 	}
 	lists, _ := pv.repo.ListLists()
@@ -134,6 +139,7 @@ func (pv *PlaylistView) loadEntries(playlistName string) {
 	}
 	pv.entries = entries
 	pv.entryList.Refresh()
+	pv.countLabel.SetText(fmt.Sprintf("%d entries", len(entries)))
 }
 
 func (pv *PlaylistView) showCreateDialog() {

@@ -15,14 +15,15 @@ import (
 )
 
 type SubscriptionView struct {
-	repo      *database.SubscriptionRepo
-	win       fyne.Window
-	entryList *widget.List
-	entries   []*model.SubscriptionEntry
-	addBtn    *widget.Button
-	deleteBtn *widget.Button
-	listID    string
-	selected  int
+	repo       *database.SubscriptionRepo
+	win        fyne.Window
+	entryList  *widget.List
+	entries    []*model.SubscriptionEntry
+	addBtn     *widget.Button
+	deleteBtn  *widget.Button
+	listID     string
+	selected   int
+	countLabel *widget.Label
 }
 
 func NewSubscriptionView(repo *database.SubscriptionRepo, win fyne.Window) *SubscriptionView {
@@ -63,6 +64,8 @@ func NewSubscriptionView(repo *database.SubscriptionRepo, win fyne.Window) *Subs
 		sv.deleteSelected()
 	})
 
+	sv.countLabel = widget.NewLabel("")
+
 	sv.ensureDefaultList()
 	sv.loadEntries()
 
@@ -76,7 +79,7 @@ func (sv *SubscriptionView) Container() fyne.CanvasObject {
 		sv.deleteBtn,
 	)
 
-	split := container.NewBorder(topBar, nil, nil, nil, sv.entryList)
+	split := container.NewBorder(topBar, sv.countLabel, nil, nil, sv.entryList)
 	return split
 }
 
@@ -112,6 +115,7 @@ func (sv *SubscriptionView) refreshEntries() {
 
 func (sv *SubscriptionView) loadEntries() {
 	if sv.listID == "" {
+		sv.countLabel.SetText("")
 		return
 	}
 	entries, err := sv.repo.GetEntries(sv.listID)
@@ -120,6 +124,7 @@ func (sv *SubscriptionView) loadEntries() {
 	}
 	sv.entries = entries
 	sv.entryList.Refresh()
+	sv.countLabel.SetText(fmt.Sprintf("%d channels", len(entries)))
 }
 
 func (sv *SubscriptionView) showAddDialog() {
