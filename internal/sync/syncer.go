@@ -14,6 +14,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/p2p/host/autorelay"
 	"github.com/multiformats/go-multiaddr"
 
 	"github.com/adam/y2psync/internal/database"
@@ -60,6 +62,9 @@ type Syncer struct {
 	running     bool
 
 	statusChan chan SyncStatus
+
+	relayMu         sync.RWMutex
+	relayCandidates []peer.AddrInfo
 }
 
 func NewSyncer(db *database.DB, configRepo *database.ConfigRepo) *Syncer {
@@ -128,6 +133,21 @@ func (s *Syncer) IsSyncConfigured() bool {
 	return configured == "true"
 }
 
+func (s *Syncer) findRelayPeers(ctx context.Context, numPeers int) <-chan peer.AddrInfo {
+	ch := make(chan peer.AddrInfo, numPeers)
+	s.relayMu.RLock()
+	n := numPeers
+	if n > len(s.relayCandidates) {
+		n = len(s.relayCandidates)
+	}
+	for _, pi := range s.relayCandidates[:n] {
+		ch <- pi
+	}
+	s.relayMu.RUnlock()
+	close(ch)
+	return ch
+}
+
 func (s *Syncer) Run() {
 	s.mu.Lock()
 	if s.running {
@@ -155,7 +175,11 @@ func (s *Syncer) Run() {
 		libp2p.ListenAddrs(listenAddr),
 		libp2p.Identity(privKey),
 		libp2p.NATPortMap(),
-		libp2p.EnableAutoRelay(),
+		libp2p.EnableRelayService(),
+		libp2p.EnableAutoRelayWithPeerSource(autorelay.PeerSource(s.findRelayPeers),
+			autorelay.WithMinCandidates(1),
+			autorelay.WithMaxCandidates(5)),
+		libp2p.EnableHolePunching(),
 	)
 	if err != nil {
 		s.setStatus(StatusError)
@@ -274,6 +298,26 @@ func (s *Syncer) discoveryLoop(ctx context.Context, disc *Discovery) {
 
 		hostID := s.host.ID().String()
 		foundNew := false
+
+		s.relayMu.Lock()
+		for _, pi := range peers {
+			if pi.ID.String() != hostID && len(pi.Addrs) > 0 {
+				already := false
+				for _, c := range s.relayCandidates {
+					if c.ID == pi.ID {
+						already = true
+						break
+					}
+				}
+				if !already {
+					s.relayCandidates = append(s.relayCandidates, pi)
+				}
+			}
+		}
+		if len(s.relayCandidates) > 20 {
+			s.relayCandidates = s.relayCandidates[len(s.relayCandidates)-20:]
+		}
+		s.relayMu.Unlock()
 
 		for _, pi := range peers {
 			pid := pi.ID.String()

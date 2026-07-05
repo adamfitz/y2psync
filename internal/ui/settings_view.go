@@ -52,8 +52,26 @@ func NewSettingsView(db *database.DB, configRepo *database.ConfigRepo, win fyne.
 	})
 
 	sv.ensurePeerID()
+	sv.refreshSyncKeyState()
 
 	return sv
+}
+
+func (sv *SettingsView) refreshSyncKeyState() {
+	configured, _ := sv.configRepo.Get("sync_key_configured")
+	if configured == "true" {
+		sv.syncKeyEntry.SetPlaceHolder("Master Sync Key is configured")
+		sv.syncKeyEntry.SetText("")
+		sv.syncKeyEntry.Disable()
+		sv.saveKeyBtn.SetText("Update Sync Key")
+		sv.saveKeyBtn.Enable()
+		sv.clearKeyBtn.Show()
+	} else {
+		sv.syncKeyEntry.SetPlaceHolder("Enter Master Sync Key (min 12 chars)")
+		sv.syncKeyEntry.Enable()
+		sv.saveKeyBtn.SetText("Save Sync Key")
+		sv.clearKeyBtn.Hide()
+	}
 }
 
 func (sv *SettingsView) Container() fyne.CanvasObject {
@@ -140,6 +158,8 @@ func (sv *SettingsView) saveSyncKey() {
 		return
 	}
 
+	sv.refreshSyncKeyState()
+
 	dialog.ShowInformation("Sync Key Saved", "Master Sync Key has been configured.\n\nSync Group Key and Rendezvous Tag derived.\nSync is now active in the background.", sv.win)
 
 	go sv.syncer.Run()
@@ -156,7 +176,9 @@ func (sv *SettingsView) clearSyncKey() {
 			sv.configRepo.Delete("sync_group_key")
 			sv.configRepo.Delete("rendezvous_tag")
 			sv.configRepo.Delete("sync_key_configured")
+			sv.configRepo.Delete("last_sync_timestamp")
 			sv.syncer.Stop()
+			sv.refreshSyncKeyState()
 			dialog.ShowInformation("Cleared", "Sync key cleared. Local data preserved.", sv.win)
 		}, sv.win)
 }

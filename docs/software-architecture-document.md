@@ -154,7 +154,7 @@ External interfaces:
 | P2P networking | libp2p v0.48 (go-libp2p + go-libp2p-kad-dht) | Mature DHT implementation; NAT traversal; Noise-encrypted streams built-in |
 | Encryption | Argon2id key derivation + libp2p Noise transport | Modern, audited, no hardware dependency |
 | Serialization | JSON over libp2p streams | Self-describing, no code generation step, sufficient for sync payloads |
-| Build system | Zig (build.zig) | Cross-compilation with bundled libc; `zig cc` as drop-in C compiler for Go CGo |
+| Build system | Zig (build.zig) | Cross-compilation with bundled libc; `zig cc` as drop-in C compiler for Go CGo. Produces fully static binaries for Linux (musl) and Windows (mingw). |
 
 ### 4.2 Architecture Pattern
 
@@ -418,7 +418,7 @@ sequenceDiagram
 
 ### 7.2 Desktop Deployment
 
-**Build system:** Zig (`build.zig`). Run `zig build native` for the host platform, or set `-Dtarget=x86_64-linux`, `-Dtarget=aarch64-macos`, `-Dtarget=x86_64-windows` for cross-compilation. The output binary is in `build/<os>-<arch>/y2psync`.
+**Build system:** Zig (`build.zig`). Run `zig build` for the host platform, or use `-Dos=linux|windows|mac` (with optional `-Darch=amd64|arm64`) for cross-compilation. Always uses `zig cc` as the C compiler. Linux builds target musl; Windows builds target mingw — both produce fully static binaries. Output goes to `build/<goos>-<goarch>/y2psync`.
 
 ```
 ┌──────────────────────────────────────┐
@@ -659,17 +659,17 @@ The sync engine exposes a `SyncStatus` struct via a channel for UI updates:
 - − Larger wire format than protobuf (acceptable for occasional sync)
 - − No schema enforcement at the serialization layer (mitigated by Go's type system)
 
-### 9.6 ADR-006: Zig Build System with Hybrid CC Strategy
+### 9.6 ADR-006: Zig Build System with Cross-Compilation
 
 **Context:** The Go + Fyne stack requires a C compiler for CGo (graphics stack + SQLite). Cross-compilation for Linux/Windows/macOS is desired.
 
-**Decision:** Use Zig's `build.zig` as the build orchestrator. For native builds, the system C compiler is used directly. For cross-compilation, `zig cc` provides a cross-compiling C compiler with bundled target libcs.
+**Decision:** Use Zig's `build.zig` as the build orchestrator. `zig cc` provides the C compiler for all targets (both native and cross), ensuring a consistent toolchain. The build script exposes `-Dos` (linux/windows/mac) and optional `-Darch` (amd64/arm64) options instead of raw Zig target triples.
 
 **Consequences:**
 - + `zig cc` enables cross-compilation without installing target-specific toolchains (MinGW, macOS SDK basics)
-- + `-extldflags=-static-libgcc` produces binaries with statically linked libgcc
-- + Single `zig build native` command for local builds
-- − Fyne's graphics stack (X11, Wayland, OpenGL) remains dynamically linked as they are OS-provided
+- + Linux builds target musl, Windows builds target mingw — both produce **fully static binaries** with no external libc dependency
+- + Single `zig build -Dos=linux` command for any target
+- − macOS binaries link Apple's system frameworks and cannot be fully static
 - − Cross-compilation requires X11 development headers for Linux targets; macOS cross-compilation requires Apple's frameworks
 
 ---
