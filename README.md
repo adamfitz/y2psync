@@ -9,37 +9,24 @@ Cross-platform peer-to-peer YouTube playlist and subscription sync tool. Built w
 
 ## Building
 
-The build system uses Zig to orchestrate `go build` with the correct environment variables and optionally provides `zig cc` as a cross-compiler for non-native targets.
+The build system uses Zig to orchestrate `go build` with `zig cc` as the C cross-compiler. All builds use `zig cc` targeting musl (Linux) or gnu (Windows) to produce **fully static binaries** — no external libc dependencies. macOS binaries link Apple's system frameworks and are not fully static.
 
-### Native build
+> **WSL2 note**: If the project is on a Windows filesystem (under `/mnt/`), Zig's cache locking fails. Either move the repo to the Linux filesystem (`~/projects/`) or set:
+> ```bash
+> export ZIG_CACHE_DIR=$HOME/.cache/zig
+> ```
 
-```bash
-zig build
-```
+### Commands
 
-Output goes to `build/<os>-<arch>/y2psync` (or `y2psync.exe` on Windows).
-
-### Cross-compilation
-
-Use `-Dos` to select the target OS and optionally `-Darch` to select the architecture:
-
-| Command | Target |
+| Command | Output |
 |---------|--------|
-| `zig build -Dos=linux` | Linux x86_64 |
-| `zig build -Dos=linux -Darch=arm64` | Linux ARM64 |
-| `zig build -Dos=windows` | Windows x86_64 |
-| `zig build -Dos=mac` | macOS ARM64 (Apple Silicon) |
-| `zig build -Dos=mac -Darch=amd64` | macOS x86_64 (Intel) |
-
-You can also use the standard Zig target triple directly:
-
-```bash
-zig build -Dtarget=x86_64-linux
-zig build -Dtarget=aarch64-linux
-zig build -Dtarget=x86_64-windows
-zig build -Dtarget=aarch64-macos
-zig build -Dtarget=x86_64-macos
-```
+| `zig build` | Native target (auto-detected) |
+| `zig build -Dos=linux` | `build/linux-amd64/y2psync` (static musl) |
+| `zig build -Dos=linux -Darch=arm64` | `build/linux-arm64/y2psync` (static musl) |
+| `zig build -Dos=windows` | `build/windows-amd64/y2psync.exe` (static) |
+| `zig build -Dos=mac` | `build/darwin-arm64/y2psync` |
+| `zig build -Dos=mac -Darch=amd64` | `build/darwin-amd64/y2psync` |
+| `zig build clean` | Remove `build/` directory |
 
 ### Options
 
@@ -47,23 +34,11 @@ zig build -Dtarget=x86_64-macos
 |------|--------|---------|-------------|
 | `-Dos` | `linux`, `windows`, `mac`, `darwin`, `macos` | native | Target OS |
 | `-Darch` | `amd64`, `x86_64`, `arm64`, `aarch64` | `amd64` (linux/windows), `arm64` (mac) | Target architecture |
-| `-Dtarget` | Zig target triple | native | Full target specification (overrides `-Dos`/`-Darch`) |
 
-### Steps
+### Linking
 
-| Command | Description |
-|---------|-------------|
-| `zig build` | Build for native or specified target |
-| `zig build clean` | Remove `build/` directory |
-
-### Output
-
-All builds are placed in `build/<goos>-<goarch>/`:
-
-```
-build/linux-amd64/y2psync
-build/linux-arm64/y2psync
-build/windows-amd64/y2psync.exe
-build/darwin-amd64/y2psync
-build/darwin-arm64/y2psync
-```
+| Platform | libc | Linkage |
+|----------|------|---------|
+| Linux | musl (zig cc) | Fully static |
+| Windows | mingw (zig cc) | Fully static |
+| macOS | System SDK (zig cc) | Dynamic (Apple frameworks) |
