@@ -86,7 +86,10 @@ pub fn build(b: *std.Build) void {
     build_step.dependOn(&go_build.step);
     b.default_step = build_step;
 
-    const clean_cmd = b.addSystemCommand(&.{ "rm", "-rf", "build/" });
+    const clean_cmd = if (@import("builtin").os.tag == .windows)
+        b.addSystemCommand(&.{ "cmd", "/c", "if exist build rmdir /s /q build" })
+    else
+        b.addSystemCommand(&.{ "rm", "-rf", "build/" });
     const clean_step = b.step("clean", "Remove build artifacts");
     clean_step.dependOn(&clean_cmd.step);
 }

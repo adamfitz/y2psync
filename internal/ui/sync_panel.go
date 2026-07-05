@@ -56,13 +56,15 @@ func (sp *SyncPanel) Container() fyne.CanvasObject {
 func (sp *SyncPanel) watchStatus() {
 	ch := sp.syncer.SyncStatusChan()
 	for ss := range ch {
-		sp.statusLabel.SetText(fmt.Sprintf("Status: %s", ss.State))
-		sp.knownLabel.SetText(fmt.Sprintf("Devices known: %d", ss.KnownPeers))
-		sp.syncedLabel.SetText(fmt.Sprintf("Devices synced: %d", ss.SyncedPeers))
-		lastSync := ss.LastSync
-		if lastSync == "" {
-			lastSync = "Never"
-		}
-		sp.lastSync.SetText("Last sync: " + lastSync)
+		fyne.Do(func() {
+			sp.statusLabel.SetText(fmt.Sprintf("Status: %s", ss.State))
+			sp.knownLabel.SetText(fmt.Sprintf("Devices known: %d", ss.KnownPeers))
+			sp.syncedLabel.SetText(fmt.Sprintf("Devices synced: %d", ss.SyncedPeers))
+			lastSync := ss.LastSync
+			if lastSync == "" {
+				lastSync = "Never"
+			}
+			sp.lastSync.SetText("Last sync: " + lastSync)
+		})
 	}
 }
